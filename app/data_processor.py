@@ -8,6 +8,16 @@ import numpy as np
 from PIL import Image
 import PyPDF2
 from typing import Dict, List, Union, Optional
+import subprocess
+import tempfile
+import logging
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 class DataProcessor:
     """
@@ -15,8 +25,9 @@ class DataProcessor:
     
     This module is responsible for:
     1. Detecting file types (.png, .jpg, .pdf, .twb/.twbx, .pbix, .csv)
-    2. Converting data to a format usable by the story generator
-    3. Extracting basic insights when possible
+    2. Converting visualization files to PDF format
+    3. Converting data to a format usable by the story generator
+    4. Extracting basic insights when possible
     """
     
     def __init__(self):
@@ -25,6 +36,78 @@ class DataProcessor:
         self.supported_document_formats = ['.pdf']
         self.supported_data_formats = ['.csv']
         self.supported_visualization_formats = ['.twb', '.twbx', '.pbix']
+        
+        # Check for required conversion tools
+        self._check_conversion_tools()
+    
+    def _check_conversion_tools(self):
+        """Check if required conversion tools are installed."""
+        try:
+            # Check for Tableau command-line tool
+            subprocess.run(['tabcmd', '--version'], capture_output=True, check=True)
+            self.has_tableau = True
+        except (subprocess.SubprocessError, FileNotFoundError):
+            logger.warning("Tableau command-line tool (tabcmd) not found. Tableau file conversion will be limited.")
+            self.has_tableau = False
+            
+        try:
+            # Check for Power BI command-line tool
+            subprocess.run(['pbicli', '--version'], capture_output=True, check=True)
+            self.has_powerbi = True
+        except (subprocess.SubprocessError, FileNotFoundError):
+            logger.warning("Power BI command-line tool (pbicli) not found. Power BI file conversion will be limited.")
+            self.has_powerbi = False
+    
+    def _convert_to_pdf(self, file_path: str) -> Optional[str]:
+        """
+        Convert visualization files to PDF format.
+        
+        Args:
+            file_path (str): Path to the visualization file
+            
+        Returns:
+            Optional[str]: Path to the converted PDF file, or None if conversion fails
+        """
+        file_ext = os.path.splitext(file_path)[1].lower()
+        
+        try:
+            # Create temporary directory for conversion
+            with tempfile.TemporaryDirectory() as temp_dir:
+                output_pdf = os.path.join(temp_dir, 'converted.pdf')
+                
+                if file_ext in ['.twb', '.twbx']:
+                    if not self.has_tableau:
+                        raise RuntimeError("Tableau command-line tool not available")
+                    
+                    # Convert Tableau file to PDF
+                    subprocess.run([
+                        'tabcmd', 'export',
+                        file_path,
+                        '--pdf',
+                        '--output', output_pdf
+                    ], check=True)
+                    
+                elif file_ext == '.pbix':
+                    if not self.has_powerbi:
+                        raise RuntimeError("Power BI command-line tool not available")
+                    
+                    # Convert Power BI file to PDF
+                    subprocess.run([
+                        'pbicli', 'export',
+                        file_path,
+                        '--format', 'pdf',
+                        '--output', output_pdf
+                    ], check=True)
+                
+                # Verify the PDF was created
+                if os.path.exists(output_pdf):
+                    return output_pdf
+                else:
+                    raise RuntimeError("PDF conversion failed")
+                    
+        except Exception as e:
+            logger.error(f"Error converting {file_path} to PDF: {e}")
+            return None
     
     def process_data_source(self, data_source: str) -> Dict:
         """
@@ -55,7 +138,19 @@ class DataProcessor:
         elif file_ext in self.supported_data_formats:
             return self._process_csv(file_path)
         elif file_ext in self.supported_visualization_formats:
-            return self._process_visualization(file_path)
+            # Convert visualization file to PDF first
+            pdf_path = self._convert_to_pdf(file_path)
+            if pdf_path:
+                return self._process_pdf(pdf_path)
+            else:
+                return {
+                    "data_type": "visualization",
+                    "file_path": file_path,
+                    "file_name": os.path.basename(file_path),
+                    "description": f"Visualization file: {os.path.basename(file_path)}",
+                    "error": "Failed to convert to PDF",
+                    "insights": ["Unable to process visualization file. Please convert to PDF manually."]
+                }
         else:
             return {
                 "data_type": "unknown",
@@ -173,19 +268,6 @@ class DataProcessor:
                 "error": str(e),
                 "insights": ["Error processing CSV data."]
             }
-    
-    def _process_visualization(self, file_path: str) -> Dict:
-        """Process visualization files (Tableau, Power BI)."""
-        file_ext = os.path.splitext(file_path)[1].lower()
-        tool = "Tableau" if file_ext in ['.twb', '.twbx'] else "Power BI"
-        
-        return {
-            "data_type": "visualization",
-            "file_path": file_path,
-            "file_name": os.path.basename(file_path),
-            "description": f"{tool} file: {os.path.basename(file_path)}",
-            "insights": [f"{tool} file requires specialized parsing."]
-        }
 
 # Singleton instance for use in other modules
 processor = DataProcessor() 
